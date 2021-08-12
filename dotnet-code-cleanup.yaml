@@ -1,0 +1,89 @@
+parameters:
+  - name: Organization
+    type: string
+  - name: Project
+    type: string
+  - name: Repository
+    type: string
+  - name: Solution
+    type: string
+
+  - name: BranchName
+    type: string
+  - name: LinkedWorkItem
+    type: number
+    
+  - name: CronExpression
+    type: string
+    default: "0 0 0 ? * * *" # At 00:00 AM every day
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: "$(CronExpression)"
+    branches:
+      include: [master]
+    always: "true"
+
+steps:
+  - checkout: none
+    persistCredentials: "true"
+
+  - script: "git clone https://$(Organization):$(System.AccessToken)@dev.azure.com/$(Organization)/$(Project)/_git/$(Repository) . --recurse-submodules"
+    displayName: Clone $(Repository)
+
+  - script: "git checkout -b $(BranchName)"
+    displayName: "Create branch $(BranchName)"
+
+  - task: NuGetAuthenticate@0
+    displayName: "NuGet Authenticate"
+
+  - script: "dotnet restore"
+    displayName: "Restore packages"
+
+  - script: "dotnet tool install JetBrains.ReSharper.GlobalTools --tool-path ~/bin"
+    displayName: "Install ReSharper Command Line Tools"
+
+  - script: "~/bin/jb cleanupcode $(Solution)"
+    displayName: "Run Code Cleanup on $(Solution)"
+
+  - script: git config --global user.name "Azure Pipelines"
+    displayName: "Set Git identity"
+
+  - script: 'git commit --all -m "Code Cleanup"'
+    displayName: "Git Commit"
+
+  - script: git push -u origin $(BranchName) -f
+    displayName: "Push origin $(BranchName)"
+
+  - script: echo $(System.AccessToken) | az devops login --org "https://dev.azure.com/$(Organization)"
+    displayName: "Log into Azure DevOps"
+
+  - powershell: |
+      $json = az repos pr list `
+      --org "https://dev.azure.com/$(Organization)"  `
+      --project "$(Project)"  `
+      --repository "$(Repository)"  `
+      --source-branch "$(BranchName)" `
+      --target-branch "master" `
+      --query "[?closedBy==null]"
+      $result = $json | ConvertFrom-Json
+
+      if ($result.Length -gt 0) {
+        Write-Host Pull Request already exists. Skipping its creation.
+        exit 0
+      }
+
+      az repos pr create `
+      --org "https://dev.azure.com/$(Organization)" `
+      --project "$(Project)" `
+      --repository "$(Repository)" `
+      --source-branch "$(BranchName)" `
+      --target-branch "master" `
+      --title "Code Cleanup" `
+      --auto-complete true `
+      --squash true `
+      --delete-source-branch true `
+      --work-items $(LinkedWorkItem)
+    displayName: "Create Pull Request"
